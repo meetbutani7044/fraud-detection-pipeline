@@ -1,0 +1,217 @@
+services:
+
+  # ── Zookeeper ───────────────────────────────────────────────────────────────
+  # Kafka still needs ZooKeeper for broker coordination in this version.
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.7.0
+    container_name: fraud-zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-logs:/var/lib/zookeeper/log
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - fraud-net
+
+  # ── Kafka ────────────────────────────────────────────────────────────────────
+  # Two listeners are needed:
+  #   PLAINTEXT        — used by containers talking to each other (kafka:29092)
+  #   PLAINTEXT_HOST   — used by the host machine (localhost:9092)
+  kafka:
+    image: confluentinc/cp-kafka:7.7.0
+    container_name: fraud-kafka
+    restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:29092", "--list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - fraud-net
+
+  # ── Kafka topic initialiser ──────────────────────────────────────────────────
+  # Creates topics before the application services start so they are
+  # guaranteed to exist with the correct partition count and replication factor.
+  # The Spring Boot services also declare topics via NewTopic beans, but those
+  # run at startup and can race with topic creation — explicit init avoids that.
+  kafka-init:
+    image: confluentinc/cp-kafka:7.7.0
+    container_name: fraud-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command: |
+      "
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+        --topic transactions --partitions 3 --replication-factor 1 && \
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+        --topic fraud-alerts --partitions 3 --replication-factor 1 && \
+      echo 'Topics created successfully' && \
+      kafka-topics --bootstrap-server kafka:29092 --list
+      "
+    networks:
+      - fraud-net
+
+  # ── Kafka UI ─────────────────────────────────────────────────────────────────
+  # Browse topics, inspect messages, monitor consumer group lag.
+  # Available at http://localhost:8090
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: fraud-kafka-ui
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: fraud-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    networks:
+      - fraud-net
+
+  # ── Redis ────────────────────────────────────────────────────────────────────
+  # Used by risk-scorer for velocity tracking (tx count per account per window).
+  # appendonly yes: persists data to disk so velocity counts survive restarts.
+  redis:
+    image: redis:7.4-alpine
+    container_name: fraud-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks:
+      - fraud-net
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  # Used by alert-service (next service) to persist fraud alerts long-term.
+  # Included here so the DB is ready when alert-service is added.
+  postgres:
+    image: postgres:16-alpine
+    container_name: fraud-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: frauddb
+      POSTGRES_USER: fraud
+      POSTGRES_PASSWORD: fraud_secret
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fraud -d frauddb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - fraud-net
+
+  # ── API Gateway ──────────────────────────────────────────────────────────────
+  # REST entry point. Accepts transactions and publishes them to Kafka.
+  # Available at http://localhost:8080
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: fraud-api-gateway
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/api/v1/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - fraud-net
+
+  # ── Risk Scorer ──────────────────────────────────────────────────────────────
+  # Kafka consumer. Scores transactions and publishes fraud alerts.
+  risk-scorer:
+    build:
+      context: ./risk-scorer
+      dockerfile: Dockerfile
+    container_name: fraud-risk-scorer
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - fraud-net
+
+# ── Volumes ───────────────────────────────────────────────────────────────────
+volumes:
+  zookeeper-data:
+  zookeeper-logs:
+  kafka-data:
+  redis-data:
+  postgres-data:
+
+# ── Network ───────────────────────────────────────────────────────────────────
+# All services share a single bridge network so they can resolve each other
+# by container name (e.g. kafka:29092, redis:6379).
+networks:
+  fraud-net:
+    driver: bridge
