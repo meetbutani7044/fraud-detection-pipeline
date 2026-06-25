@@ -1,0 +1,94 @@
+# Single-replica Zookeeper for dev/staging.
+# For production HA use a 3-node ensemble (odd quorum).
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zookeeper
+  namespace: fraud-detection
+  labels:
+    app.kubernetes.io/name: zookeeper
+    app.kubernetes.io/part-of: fraud-detection-pipeline
+spec:
+  clusterIP: None   # headless — required by StatefulSet for stable DNS
+  selector:
+    app.kubernetes.io/name: zookeeper
+  ports:
+    - name: client
+      port: 2181
+      targetPort: 2181
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: zookeeper
+  namespace: fraud-detection
+  labels:
+    app.kubernetes.io/name: zookeeper
+    app.kubernetes.io/part-of: fraud-detection-pipeline
+spec:
+  serviceName: zookeeper
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zookeeper
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zookeeper
+        app.kubernetes.io/part-of: fraud-detection-pipeline
+    spec:
+      containers:
+        - name: zookeeper
+          image: confluentinc/cp-zookeeper:7.7.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 2181
+              name: client
+          env:
+            - name: ZOOKEEPER_CLIENT_PORT
+              value: "2181"
+            - name: ZOOKEEPER_TICK_TIME
+              value: "2000"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          readinessProbe:
+            exec:
+              command: ["bash", "-c", "echo ruok | nc localhost 2181 | grep imok"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          livenessProbe:
+            exec:
+              command: ["bash", "-c", "echo ruok | nc localhost 2181 | grep imok"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: zookeeper-data
+              mountPath: /var/lib/zookeeper/data
+            - name: zookeeper-logs
+              mountPath: /var/lib/zookeeper/log
+  volumeClaimTemplates:
+    - metadata:
+        name: zookeeper-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+    - metadata:
+        name: zookeeper-logs
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 512Mi
