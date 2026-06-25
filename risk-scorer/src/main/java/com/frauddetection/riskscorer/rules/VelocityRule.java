@@ -11,7 +11,10 @@ import java.time.Duration;
 import java.util.Optional;
 
 /**
- * Fires when an account submits more than N transactions in a sliding window.
+ * Fires when an account's transaction count EXCEEDS max-transactions within a window.
+ * With the default max-transactions=5, transactions 1–5 are allowed; the 6th triggers.
+ * Use count > maxTransactions (strictly greater), not >=, so max-transactions=5 permits
+ * exactly 5 transactions before raising an alert.
  *
  * Redis key: velocity:{accountId}
  * Strategy: INCR the key on every transaction; set TTL on first write only
