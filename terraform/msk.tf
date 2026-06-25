@@ -97,10 +97,12 @@ resource "aws_msk_cluster" "main" {
     }
   }
 
-  broker_logs {
-    cloudwatch_logs {
-      enabled   = true
-      log_group = aws_cloudwatch_log_group.msk_broker.name
+  logging_info {
+    broker_logs {
+      cloudwatch_logs {
+        enabled   = true
+        log_group = aws_cloudwatch_log_group.msk_broker.name
+      }
     }
   }
 
