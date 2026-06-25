@@ -118,9 +118,14 @@ variable "msk_broker_instance_type" {
 }
 
 variable "msk_broker_count" {
-  description = "Number of MSK brokers (must be a multiple of the number of AZs)"
+  description = "Number of MSK brokers (must be a positive multiple of 2 — one per AZ)"
   type        = number
   default     = 2
+
+  validation {
+    condition     = var.msk_broker_count > 0 && var.msk_broker_count % 2 == 0
+    error_message = "msk_broker_count must be a positive even number (vpc.tf provisions 2 AZs, so broker count must be a multiple of 2)."
+  }
 }
 
 variable "msk_broker_storage_gb" {
