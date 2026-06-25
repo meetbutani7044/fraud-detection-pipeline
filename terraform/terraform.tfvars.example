@@ -1,0 +1,31 @@
+# Copy this file to terraform.tfvars and fill in real values.
+# terraform.tfvars is gitignored — never commit credentials.
+
+aws_region   = "us-east-1"
+project_name = "fraud-detection"
+environment  = "dev"
+
+vpc_cidr = "10.0.0.0/16"
+
+# EKS
+eks_kubernetes_version = "1.31"
+eks_node_instance_type = "t3.medium"
+eks_node_desired       = 2
+eks_node_min           = 2
+eks_node_max           = 5
+
+# RDS — set db_password via TF_VAR_db_password env var, not here
+db_instance_class    = "db.t3.micro"
+db_name              = "frauddb"
+db_username          = "fraud"
+db_password          = "CHANGE_ME"
+db_allocated_storage = 20
+
+# ElastiCache
+redis_node_type = "cache.t3.micro"
+
+# MSK
+msk_kafka_version        = "3.6.0"
+msk_broker_instance_type = "kafka.m5.large"
+msk_broker_count         = 2
+msk_broker_storage_gb    = 100
