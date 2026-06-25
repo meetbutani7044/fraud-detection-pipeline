@@ -53,7 +53,7 @@ public class AlertService {
 
         FraudAlertEntity entity = toEntity(event);
         repository.save(entity);
-        cacheAlert(event);
+        cacheAlert(entity);
 
         log.info("Alert saved: transactionId={} accountId={} rule={} score={}",
                 event.getTransactionId(), event.getAccountId(),
@@ -75,11 +75,9 @@ public class AlertService {
         String cached = redis.opsForValue().get(KEY_TXN + transactionId);
         if (cached != null) {
             try {
-                FraudAlertEvent event = objectMapper.readValue(cached, FraudAlertEvent.class);
-                return repository.findByTransactionId(transactionId).map(AlertResponse::from)
-                        .or(() -> Optional.empty());
+                return Optional.of(objectMapper.readValue(cached, AlertResponse.class));
             } catch (JsonProcessingException e) {
-                log.warn("Failed to deserialize cached alert for transactionId={}", transactionId);
+                log.warn("Stale/corrupt cache entry for transactionId={}, falling back to DB", transactionId);
             }
         }
         return repository.findByTransactionId(transactionId).map(AlertResponse::from);
@@ -97,18 +95,20 @@ public class AlertService {
         return entity;
     }
 
-    private void cacheAlert(FraudAlertEvent event) {
+    private void cacheAlert(FraudAlertEntity entity) {
         try {
-            String json = objectMapper.writeValueAsString(event);
-            String txnKey  = KEY_TXN  + event.getTransactionId();
-            String acctKey = KEY_ACCT + event.getAccountId();
+            // Cache AlertResponse (not FraudAlertEvent) so getAlertByTransactionId can
+            // return it directly on a cache hit without hitting the database.
+            String json = objectMapper.writeValueAsString(AlertResponse.from(entity));
+            String txnKey  = KEY_TXN  + entity.getTransactionId();
+            String acctKey = KEY_ACCT + entity.getAccountId();
 
             redis.opsForValue().set(txnKey, json, Duration.ofHours(redisTtlHours));
-            redis.opsForList().leftPush(acctKey, event.getTransactionId());
+            redis.opsForList().leftPush(acctKey, entity.getTransactionId());
             redis.opsForList().trim(acctKey, 0, recentPerAccount - 1);
             redis.expire(acctKey, Duration.ofHours(redisTtlHours));
         } catch (JsonProcessingException e) {
-            log.warn("Failed to cache alert in Redis: transactionId={}", event.getTransactionId());
+            log.warn("Failed to cache alert in Redis: transactionId={}", entity.getTransactionId());
         }
     }
 }
