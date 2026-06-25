@@ -18,14 +18,15 @@ import java.util.Optional;
  * Consumes messages from the transactions topic, runs the rule engine,
  * and publishes a FraudAlert when a rule fires.
  *
- * Acknowledgment mode is MANUAL_IMMEDIATE: the offset is committed only
- * after we have successfully evaluated the transaction.  If the service
- * crashes mid-processing the message will be re-delivered — acceptable
- * because rule evaluation is idempotent (same transaction → same result).
+ * Acknowledgment mode is MANUAL_IMMEDIATE. The offset is committed only
+ * after the fraud alert has been durably written to the fraud-alerts topic.
+ * If the alert publish fails (transient broker error), the offset is NOT
+ * acknowledged so Kafka re-delivers the message on the next poll.
  *
- * The consumer group "risk-scorer-group" means Kafka tracks the read
- * offset independently per service, so other consumers of the same topic
- * (e.g. audit loggers) are unaffected.
+ * For clean transactions (no rule fires) the offset is committed immediately.
+ * For deserialization or rule-engine failures the offset is also committed
+ * to avoid a poison-pill replay loop — a dead-letter topic should be used
+ * in production for those cases.
  */
 @Component
 public class TransactionConsumer {
@@ -62,12 +63,21 @@ public class TransactionConsumer {
             Optional<FraudAlert> alert = ruleEngine.evaluate(transactionId, event);
 
             if (alert.isPresent()) {
-                alertProducer.publishAlert(alert.get());
+                // Ack only after the alert is durably written to Kafka.
+                // If the send fails, don't ack — Kafka will re-deliver this record.
+                alertProducer.publishAlert(alert.get())
+                        .whenComplete((result, ex) -> {
+                            if (ex != null) {
+                                log.error("Alert publish failed, not acknowledging for retry: transactionId={} error={}",
+                                        transactionId, ex.getMessage());
+                            } else {
+                                ack.acknowledge();
+                            }
+                        });
             } else {
                 log.debug("Transaction clean: transactionId={}", transactionId);
+                ack.acknowledge();
             }
-
-            ack.acknowledge();
 
         } catch (Exception e) {
             log.error("Failed to process transaction: transactionId={} error={}",
