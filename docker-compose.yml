@@ -201,6 +201,43 @@ services:
     networks:
       - fraud-net
 
+  # ── Alert Service ────────────────────────────────────────────────────────────
+  # Kafka consumer for fraud-alerts. Persists to PostgreSQL, caches in Redis.
+  # Query API available at http://localhost:8082
+  alert-service:
+    build:
+      context: ./alert-service
+      dockerfile: Dockerfile
+    container_name: fraud-alert-service
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8082:8082"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      DB_URL: jdbc:postgresql://postgres:5432/frauddb
+      DB_USERNAME: fraud
+      DB_PASSWORD: fraud_secret
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8082/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    networks:
+      - fraud-net
+
 # ── Volumes ───────────────────────────────────────────────────────────────────
 volumes:
   zookeeper-data:
